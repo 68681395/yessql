@@ -3,18 +3,18 @@ using YesSql.Tests.Models;
 
 namespace YesSql.Tests.Indexes
 {
-    public class PersonByName : MapIndex
+    public class PersonByNameCol : MapIndex
     {
         public string Name { get; set; }
     }
 
-    public class PersonIndexProvider : IndexProvider<Person>
+    public class PersonIndexProviderCol : IndexProvider<Person>
     {
         public override void Describe(DescribeContext<Person> context)
         {
             context
-                .For<PersonByName>()
-                .Map(person => new PersonByName { Name = person.Firstname });
+                .For<PersonByNameCol>()
+                .Map(person => new PersonByNameCol { Name = person.Firstname });
         }
     }
 }

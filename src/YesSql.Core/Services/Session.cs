@@ -13,34 +13,34 @@ using YesSql.Core.Query;
 using YesSql.Core.Serialization;
 using YesSql.Core.Sql;
 using YesSql.Core.Storage;
+using YesSql.Core.Collections;
 
 namespace YesSql.Core.Services
 {
     public class Session : ISession
     {
-        // Wether the Session should track the entities itself, in case the underlying
-        // storage API doesn't do it
-        private readonly DbConnection _connection;
         private DbTransaction _transaction;
-        private IsolationLevel _isolationLevel;
+
+        private readonly IdentityMap _identityMap = new IdentityMap();
+        private readonly List<IIndexCommand> _commands = new List<IIndexCommand>();
+        private readonly IDictionary<IndexDescriptor, IList<MapState>> _maps;
+        private readonly HashSet<object> _saved = new HashSet<object>();
+        private readonly HashSet<object> _updated = new HashSet<object>();
+        private readonly HashSet<object> _deleted = new HashSet<object>();
+        private readonly IDocumentStorage _storage;
+        private readonly Store _store;
         private readonly ISqlDialect _dialect;
+        private readonly IsolationLevel _isolationLevel;
+        private readonly DbConnection _connection;
+        private volatile bool _disposed;
 
-        protected readonly IdentityMap _identityMap = new IdentityMap();
-        private List<IIndexCommand> _commands = new List<IIndexCommand>();
-        protected readonly IDictionary<IndexDescriptor, IList<MapState>> _maps;
-        protected readonly HashSet<object> _saved = new HashSet<object>();
-        protected readonly HashSet<object> _updated = new HashSet<object>();
-        protected readonly HashSet<object> _deleted = new HashSet<object>();
-        protected readonly IDocumentStorage _storage;
-
-        private Store _store;
         protected bool _cancel;
 
-        public Session(IDocumentStorage storage, Store store)
+        public Session(Func<ISession, IDocumentStorage> storage, Store store, IsolationLevel isolationLevel)
         {
-            _storage = storage;
+            _storage = storage(this);
             _store = store;
-            _isolationLevel = store.Configuration.IsolationLevel;
+            _isolationLevel = isolationLevel;
 
             _maps = new Dictionary<IndexDescriptor, IList<MapState>>();
 
@@ -59,43 +59,54 @@ namespace YesSql.Core.Services
 
         public void Save(object entity)
         {
-            // is it a new object?
-            if (!_identityMap.HasEntity(entity))
+            CheckDisposed();
+
+            int id;
+
+            // already being saved or updated?
+            if (_saved.Contains(entity) || _updated.Contains(entity))
             {
-                // already beging saved?
-                if (_saved.Contains(entity))
+                return;
+            }
+
+            // is it a new object?
+            if (_identityMap.TryGetDocumentId(entity, out id))
+            {
+                // already being updated?
+                if (_updated.Contains(entity))
                 {
                     return;
                 }
 
-                // then assign it an identifier
-                var accessor = _store.GetIdAccessor(entity.GetType(), "Id");
-                if (accessor != null)
-                {
-                    var id = accessor.Get(entity);
-
-                    // do we need to track the entity
-                    if (id > 0)
-                    {
-                        _identityMap.Add(id, entity);
-                        _updated.Add(entity);
-                        return;
-                    }
-                    else
-                    {
-                        // it's a new entity
-                        id = _store.GetNextId();
-                        accessor.Set(entity, id);
-                    }
-                }
-
-                _saved.Add(entity);
-            }
-            else
-            {
-                // update it
                 _updated.Add(entity);
+                return;
             }
+
+            // Does it have a valid identifier?
+            var accessor = _store.GetIdAccessor(entity.GetType(), "Id");
+            if (accessor != null)
+            {
+                id = accessor.Get(entity);
+
+                if (id > 0)
+                {
+                    _identityMap.Add(id, entity);
+                    _updated.Add(entity);
+                    return;
+                }
+            }
+            
+            // Then assign a new identifier if it has one
+            if (accessor != null)
+            {
+                // it's a new entity
+                var collection = CollectionHelper.Current.GetSafeName();
+                id = _store.GetNextId(collection);
+                accessor.Set(entity, id);
+                _identityMap.Add(id, entity);
+            }
+
+            _saved.Add(entity);
         }
 
         private async Task SaveEntityAsync(object entity, bool update)
@@ -118,22 +129,25 @@ namespace YesSql.Core.Services
             }
             else
             {
-                // if the object is not new, reload to get the old map
+                // If the object is not new, reload to get the old map
                 int id;
-                if(_identityMap.TryGetDocumentId(entity, out id))
+
+                if (update)
                 {
-                    if (update)
+                    if (!_identityMap.TryGetDocumentId(entity, out id))
                     {
-                        var oldDoc = await GetDocumentByIdAsync(id);
-                        var oldObj = await _storage.GetAsync(id, entity.GetType());
-
-                        // Update map index
-                        MapDeleted(oldDoc, oldObj);
-                        MapNew(oldDoc, entity);
-
-                        // Save entity
-                        await _storage.UpdateAsync(new IdentityDocument(id, entity));
+                        throw new InvalidOperationException();
                     }
+
+                    var oldDoc = await GetDocumentByIdAsync(id);
+                    var oldObj = await _storage.GetAsync(id, entity.GetType());
+
+                    // Update map index
+                    MapDeleted(oldDoc, oldObj);
+                    MapNew(oldDoc, entity);
+
+                    // Save entity
+                    await _storage.UpdateAsync(new IdentityDocument(id, entity));
                 }
                 else
                 {
@@ -144,20 +158,18 @@ namespace YesSql.Core.Services
 
                     // Get the entity's Id if assigned
                     var accessor = _store.GetIdAccessor(entity.GetType(), "Id");
-                    if(accessor != null)
+                    if (accessor != null)
                     {
                         doc.Id = accessor.Get(entity);
                     }
                     else
                     {
-                        doc.Id = _store.GetNextId();
+                        var collection = CollectionHelper.Current.GetSafeName();
+                        doc.Id = _store.GetNextId(collection);
                     }
 
                     await new CreateDocumentCommand(doc, _store.Configuration.TablePrefix).ExecuteAsync(_connection, _transaction);
                     await _storage.CreateAsync(new IdentityDocument(doc.Id, entity));
-
-                    // Track the newly created object
-                    _identityMap.Add(doc.Id, entity);
 
                     MapNew(doc, entity);
                 }
@@ -173,6 +185,8 @@ namespace YesSql.Core.Services
 
         public void Delete(object obj)
         {
+            CheckDisposed();
+
             _deleted.Add(obj);
         }
 
@@ -215,8 +229,10 @@ namespace YesSql.Core.Services
 
         public async Task<IEnumerable<T>> GetAsync<T>(IEnumerable<int> ids) where T : class
         {
+            CheckDisposed();
+
             // Auto-flush
-            await CommitAsync(keepTracked: true);
+            await CommitAsync();
 
             var result = new List<T>();
 
@@ -285,8 +301,21 @@ namespace YesSql.Core.Services
             return new DefaultQuery(_connection, _transaction, this, _store.Configuration.TablePrefix);
         }
 
+        private void CheckDisposed()
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(Session));
+            }
+        }
+
         public void Dispose()
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             try
             {
                 if (!_cancel)
@@ -309,6 +338,8 @@ namespace YesSql.Core.Services
             }
             finally
             {
+                _disposed = true;
+
                 if (_transaction != null)
                 {
                     _transaction.Dispose();
@@ -329,9 +360,11 @@ namespace YesSql.Core.Services
             }
         }
 
-        public async Task CommitAsync(bool keepTracked = false)
+        public async Task CommitAsync()
         {
-            if(_saved.Count == 0 && _updated.Count == 0 && _deleted.Count == 0)
+            CheckDisposed();
+
+            if (_saved.Count == 0 && _updated.Count == 0 && _deleted.Count == 0)
             {
                 return;
             }
@@ -360,23 +393,12 @@ namespace YesSql.Core.Services
             // compute all reduce indexes
             await ReduceAsync();
 
-            foreach(var command in _commands.OrderBy(x => x.ExecutionOrder))
+            foreach (var command in _commands.OrderBy(x => x.ExecutionOrder))
             {
                 await command.ExecuteAsync(_connection, _transaction);
             }
 
-            if(keepTracked)
-            {
-                foreach(var saved in _saved)
-                {
-                    _updated.Add(saved);
-                }
-            }
-            else
-            {
-                _updated.Clear();
-            }
-
+            _updated.Clear();
             _saved.Clear();
             _deleted.Clear();
             _commands.Clear();
@@ -511,7 +533,7 @@ namespace YesSql.Core.Services
             }
         }
 
-        public async Task<ReduceIndex> ReduceForAsync(IndexDescriptor descriptor, object currentKey)
+        private async Task<ReduceIndex> ReduceForAsync(IndexDescriptor descriptor, object currentKey)
         {
             var name = _store.Configuration.TablePrefix + descriptor.IndexType.Name;
             var sql = $"select * from {name} where {descriptor.GroupKey.Name} = @currentKey";
@@ -549,7 +571,7 @@ namespace YesSql.Core.Services
 
                 foreach (var index in mapped)
                 {
-                    if(index == null)
+                    if (index == null)
                     {
                         continue;
                     }
@@ -619,8 +641,10 @@ namespace YesSql.Core.Services
         /// <summary>
         /// Initializes a new transaction if none has been yet
         /// </summary>
-        protected void Demand()
+        public DbTransaction Demand()
         {
+            CheckDisposed();
+
             if (_transaction == null)
             {
                 if (_connection.State == ConnectionState.Closed)
@@ -630,17 +654,15 @@ namespace YesSql.Core.Services
 
                 _transaction = _connection.BeginTransaction(_isolationLevel);
             }
+
+            return _transaction;
         }
 
         public void Cancel()
         {
-            _cancel = true;
-        }
+            CheckDisposed();
 
-        public ISession IsolationLevel(IsolationLevel isolationLevel)
-        {
-            _isolationLevel = isolationLevel;
-            return this;
+            _cancel = true;
         }
 
         public void ExecuteMigration(Action<SchemaBuilder> migration, bool throwException = true)
@@ -660,7 +682,5 @@ namespace YesSql.Core.Services
                 }
             }
         }
-
     }
-
 }

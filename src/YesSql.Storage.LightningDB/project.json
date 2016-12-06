@@ -1,24 +1,21 @@
 ﻿{
-  "version": "1.0.0-alpha-1010",
+  "version": "1.0.0-beta-0002b",
   "authors": [ "Sebastien Ros" ],
   "copyright": "Sebastien Ros",
   "packOptions": {
-    "projectUrl": "https://github.com/sebastienros/yessql/blob/dnx",
-    "licenseUrl": "https://github.com/sebastienros/yessql/blob/dnx/LICENSE.txt"
+    "projectUrl": "https://github.com/sebastienros/yessql",
+    "licenseUrl": "https://github.com/sebastienros/yessql/blob/master/LICENSE.txt"
+
   },
   "dependencies": {
     "YesSql.Core": "2.0.0-*",
-    "LightningDB": "0.9.3-rc1-45"
+    "LightningDB": "0.9.7"
   },
   "frameworks": {
     "net451": { },
     "netstandard1.5": {
-      "imports": [
-        "dnxcore50",
-        "portable-net451+win8"
-      ],
       "dependencies": {
-        "NETStandard.Library": "1.5.0-*"
+        "NETStandard.Library": "1.6.0"
       }
     }
   }

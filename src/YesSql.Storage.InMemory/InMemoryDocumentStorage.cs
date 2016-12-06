@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using YesSql.Core.Storage;
+using YesSql.Core.Services;
 
 namespace YesSql.Storage.InMemory
 {
@@ -19,6 +20,8 @@ namespace YesSql.Storage.InMemory
         public InMemoryDocumentStorage()
         {
         }
+
+        public ISession Session { get; set; }
 
         public Task CreateAsync(params IIdentityEntity[] documents)
         {
@@ -46,7 +49,7 @@ namespace YesSql.Storage.InMemory
                 throw new ArgumentException("Can't delete a document with a null id");
             }
 
-            foreach(var document in documents)
+            foreach (var document in documents)
             {
                 _documents.Remove(document.Id);
             }

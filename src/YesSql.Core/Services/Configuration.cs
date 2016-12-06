@@ -8,7 +8,7 @@ namespace YesSql.Core.Services
 {
     public class Configuration
     {
-        internal Configuration()
+        public Configuration()
         {
             IdentifierFactory = new DefaultIdentifierFactory();
             IsolationLevel = IsolationLevel.ReadCommitted;
@@ -49,7 +49,7 @@ namespace YesSql.Core.Services
 
         public DbConnection CreateConnection()
         {
-            if(_reuseConnection)
+            if (_reuseConnection)
             {
                 if (_reusedConnection == null)
                 {
@@ -68,7 +68,7 @@ namespace YesSql.Core.Services
 
         public void Dispose()
         {
-            if(_reuseConnection)
+            if (_reuseConnection)
             {
                 if (_reusedConnection != null)
                 {

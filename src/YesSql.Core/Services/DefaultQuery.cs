@@ -11,13 +11,16 @@ using YesSql.Core.Indexes;
 using YesSql.Core.Query;
 using YesSql.Core.Serialization;
 using YesSql.Core.Sql;
+using YesSql.Core.Collections;
 
 namespace YesSql.Core.Services
 {
-    public class DefaultQuery : IQuery {
+    public class DefaultQuery : IQuery
+    {
         private readonly Session _session;
 
         private List<Type> _bound = new List<Type>();
+        private readonly string _documentTable;
         private readonly DbConnection _connection;
         private readonly ISqlDialect _dialect;
         private readonly DbTransaction _transaction;
@@ -25,7 +28,7 @@ namespace YesSql.Core.Services
         private SqlBuilder _sqlBuilder;
         private StringBuilder _builder = new StringBuilder();
 
-        public static Dictionary<MethodInfo, Action<DefaultQuery, StringBuilder, MethodCallExpression>> MethodMappings = 
+        public static Dictionary<MethodInfo, Action<DefaultQuery, StringBuilder, MethodCallExpression>> MethodMappings =
             new Dictionary<MethodInfo, Action<DefaultQuery, StringBuilder, MethodCallExpression>>();
 
         static DefaultQuery()
@@ -74,7 +77,8 @@ namespace YesSql.Core.Services
                 {
                     builder.Append(" 1 = 0");
                 }
-                else {
+                else
+                {
                     query.ConvertFragment(builder, expression.Arguments[0]);
                     builder.Append(" in (");
                     for (var i = 0; i < values.Length; i++)
@@ -92,6 +96,7 @@ namespace YesSql.Core.Services
 
         public DefaultQuery(DbConnection connection, DbTransaction transaction, Session session, string tablePrefix)
         {
+            _documentTable = CollectionHelper.Current.GetPrefixedName(Store.DocumentTable);
             _connection = connection;
             _transaction = transaction;
             _session = session;
@@ -102,7 +107,7 @@ namespace YesSql.Core.Services
 
         private void Bind<TIndex>() where TIndex : IIndex
         {
-            if(_bound.Contains(typeof(TIndex)))
+            if (_bound.Contains(typeof(TIndex)))
             {
                 return;
             }
@@ -113,14 +118,14 @@ namespace YesSql.Core.Services
             if (typeof(MapIndex).IsAssignableFrom(typeof(TIndex)))
             {
                 // inner join [PersonByName] on [PersonByName].[Id] = [Document].[Id]
-                _sqlBuilder.InnerJoin(name, name, "DocumentId", "Document", "Id");
+                _sqlBuilder.InnerJoin(name, name, "DocumentId", _documentTable, "Id");
             }
             else
             {
-                var bridgeName = name + "_Document";
+                var bridgeName = name + "_" + _documentTable;
 
                 // inner join [ArticlesByDay_Document] on [Document].[Id] = [ArticlesByDay_Document].[DocumentId]
-                _sqlBuilder.InnerJoin(bridgeName, "Document", "Id", bridgeName, "DocumentId");
+                _sqlBuilder.InnerJoin(bridgeName, _documentTable, "Id", bridgeName, "DocumentId");
 
                 // inner join [ArticlesByDay] on [ArticlesByDay_Document].[ArticlesByDayId] = [ArticlesByDay].[Id]
                 _sqlBuilder.InnerJoin(name, bridgeName, name + "Id", name, "Id");
@@ -147,7 +152,7 @@ namespace YesSql.Core.Services
             }
 
             _builder.Clear();
-            // if Filter is called, the Document type is implicit so there is no need to filter on TIndex 
+            // if Filter is called, the Document type is implicit so there is no need to filter on TIndex
             ConvertPredicate(_builder, predicate.Body);
             _sqlBuilder.WhereAlso(_builder.ToString());
         }
@@ -260,7 +265,7 @@ namespace YesSql.Core.Services
 
         /// <summary>
         /// Return true if an expression path is based on the parameter of the predicate.
-        /// If false it means the expression should be evaluated, otherwise converted to 
+        /// If false it means the expression should be evaluated, otherwise converted to
         /// its sql equivalent.
         /// </summary>
         /// <param name="e"></param>
@@ -295,7 +300,7 @@ namespace YesSql.Core.Services
                 case ExpressionType.Call:
                     var methodCallExpression = (MethodCallExpression)expression;
 
-                    if(methodCallExpression.Object == null)
+                    if (methodCallExpression.Object == null)
                     {
                         // Static call
                         return IsParameterBased(methodCallExpression.Arguments[0]);
@@ -338,10 +343,10 @@ namespace YesSql.Core.Services
         private Expression RemoveUnboxing(Expression e)
         {
             // If an expression is a conversion, extract its body.
-            // This is used when an OrderBy expression uses a ValueType but 
+            // This is used when an OrderBy expression uses a ValueType but
             // it's automatically using unboxing conversion (to object)
 
-            if(e.NodeType == ExpressionType.Convert)
+            if (e.NodeType == ExpressionType.Convert)
             {
                 return ((UnaryExpression)e).Operand;
             }
@@ -380,7 +385,7 @@ namespace YesSql.Core.Services
         public async Task<int> CountAsync()
         {
             // Commit any pending changes before doing a query (auto-flush)
-            await _session.CommitAsync(keepTracked: true);
+            await _session.CommitAsync();
 
             _sqlBuilder.Selector("count(*)");
             var sql = _sqlBuilder.ToSqlString(_dialect, true);
@@ -393,24 +398,24 @@ namespace YesSql.Core.Services
             _bound.Add(typeof(Document));
 
             _sqlBuilder.Select();
-            _sqlBuilder.Table("Document");
+            _sqlBuilder.Table(_documentTable);
 
             if (filterType)
             {
-                _sqlBuilder.WhereAlso(_sqlBuilder.FormatColumn("Document", "Type") + " = @Type"); // TODO: investigate, this makes the query 3 times slower on sqlite
+                _sqlBuilder.WhereAlso(_sqlBuilder.FormatColumn(_documentTable, "Type") + " = @Type"); // TODO: investigate, this makes the query 3 times slower on sqlite
                 _sqlBuilder.Parameters["@Type"] = typeof(T).SimplifiedTypeName();
             }
 
             return new Query<T>(this);
         }
-        
+
         IQueryIndex<TIndex> IQuery.ForIndex<TIndex>()
         {
             _bound.Clear();
             _bound.Add(typeof(TIndex));
             _sqlBuilder.Select();
             _sqlBuilder.Table(typeof(TIndex).Name);
-            
+
             return new QueryIndex<TIndex>(this);
         }
 
@@ -420,7 +425,7 @@ namespace YesSql.Core.Services
             _bound.Add(typeof(Document));
 
             _sqlBuilder.Select();
-            _sqlBuilder.Table("Document");
+            _sqlBuilder.Table(_documentTable);
             _sqlBuilder.Selector("*");
             return new Query<object>(this);
         }
@@ -429,10 +434,11 @@ namespace YesSql.Core.Services
         {
             protected readonly DefaultQuery _query;
 
-            public Query(DefaultQuery query) {
+            public Query(DefaultQuery query)
+            {
                 _query = query;
             }
-                        
+
             public Task<T> FirstOrDefault()
             {
                 return FirstOrDefaultImpl();
@@ -441,7 +447,7 @@ namespace YesSql.Core.Services
             protected async Task<T> FirstOrDefaultImpl()
             {
                 // Commit any pending changes before doing a query (auto-flush)
-                await _query._session.CommitAsync(keepTracked: true);
+                await _query._session.CommitAsync();
 
                 _query.Page(1, 0);
 
@@ -453,7 +459,7 @@ namespace YesSql.Core.Services
                 }
                 else
                 {
-                    _query._sqlBuilder.Selector("Document", "Id");
+                    _query._sqlBuilder.Selector(_query._documentTable, "Id");
                     var sql = _query._sqlBuilder.ToSqlString(_query._dialect);
                     var ids = (await _query._connection.QueryAsync<int>(sql, _query._sqlBuilder.Parameters, _query._transaction)).ToArray();
 
@@ -474,7 +480,7 @@ namespace YesSql.Core.Services
             public async Task<IEnumerable<T>> ListImpl()
             {
                 // Commit any pending changes before doing a query (auto-flush)
-                await _query._session.CommitAsync(keepTracked: true);
+                await _query._session.CommitAsync();
 
                 if (typeof(IIndex).IsAssignableFrom(typeof(T)))
                 {
@@ -484,7 +490,7 @@ namespace YesSql.Core.Services
                 }
                 else
                 {
-                    _query._sqlBuilder.Selector(_query._sqlBuilder.FormatColumn("Document", "*"));
+                    _query._sqlBuilder.Selector(_query._sqlBuilder.FormatColumn(_query._documentTable, "*"));
                     var sql = _query._sqlBuilder.ToSqlString(_query._dialect);
                     var documents = await _query._connection.QueryAsync<Document>(sql, _query._sqlBuilder.Parameters, _query._transaction);
                     return await _query._session.GetAsync<T>(documents.Select(x => x.Id));
@@ -503,18 +509,18 @@ namespace YesSql.Core.Services
                 return this;
             }
 
-            async Task<int> IQuery<T>.Count() 
+            async Task<int> IQuery<T>.Count()
             {
                 return await _query.CountAsync();
             }
 
-            IQuery<T, TIndex> IQuery<T>.With<TIndex>() 
+            IQuery<T, TIndex> IQuery<T>.With<TIndex>()
             {
                 _query.Bind<TIndex>();
                 return new Query<T, TIndex>(_query);
             }
 
-            IQuery<T, TIndex> IQuery<T>.With<TIndex>(Expression<Func<TIndex, bool>> predicate) 
+            IQuery<T, TIndex> IQuery<T>.With<TIndex>(Expression<Func<TIndex, bool>> predicate)
             {
                 _query.Bind<TIndex>();
                 _query.Filter(predicate);
@@ -604,12 +610,13 @@ namespace YesSql.Core.Services
             }
         }
 
-        class Query<T, TIndex> : Query<T>, IQuery<T, TIndex> 
-            where T : class 
+        class Query<T, TIndex> : Query<T>, IQuery<T, TIndex>
+            where T : class
             where TIndex : IIndex
         {
             public Query(DefaultQuery query)
-                : base(query) {
+                : base(query)
+            {
             }
 
             IQuery<T, TIndex> IQuery<T, TIndex>.Where(string sql)
@@ -619,7 +626,7 @@ namespace YesSql.Core.Services
             }
 
 
-            IQuery<T, TIndex> IQuery<T, TIndex>.Where(Expression<Func<TIndex, bool>> predicate) 
+            IQuery<T, TIndex> IQuery<T, TIndex>.Where(Expression<Func<TIndex, bool>> predicate)
             {
                 _query.Filter<TIndex>(predicate);
                 return this;

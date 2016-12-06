@@ -18,7 +18,7 @@ namespace YesSql.Core.Services
         /// the corresponding indexes.
         /// </summary>
         void Save(object obj);
-
+        
         /// <summary>
         /// Deletes an object from the store and its indexes.
         /// </summary>
@@ -44,12 +44,12 @@ namespace YesSql.Core.Services
         /// <c>True</c> if the tracked entities should still be tracked. This
         /// parameter should normally not be used.
         /// </param>
-        Task CommitAsync(bool keepTracked = false);
+        Task CommitAsync();
 
         /// <summary>
         /// Returns a <see cref="DbTransaction"/> that is used by this instance.
         /// </summary>
-        DbTransaction Transaction { get; }
+        DbTransaction Demand();
 
         void ExecuteMigration(Action<SchemaBuilder> migration, bool throwException = true);
 

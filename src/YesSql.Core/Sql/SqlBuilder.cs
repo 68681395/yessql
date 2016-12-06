@@ -43,16 +43,16 @@ namespace YesSql.Core.Sql
         }
         public void InnerJoin(string table, string onTable, string onColumn, string toTable, string toColumn)
         {
-            if(_join == null)
+            if (_join == null)
             {
                 _join = new StringBuilder();
             }
 
             _join.Append("inner join ").Append("[").Append(TablePrefix).Append(table)
                 .Append("] on [").Append(TablePrefix).Append(onTable)
-                .Append("].").Append(onColumn)
+                .Append("].[").Append(onColumn).Append("]")
                 .Append(" = [").Append(TablePrefix).Append(toTable)
-                .Append("].").Append(toColumn).Append(" ");
+                .Append("].[").Append(toColumn).Append("] ");
         }
 
         public void Select()
@@ -77,6 +77,11 @@ namespace YesSql.Core.Sql
 
         public string FormatColumn(string table, string column)
         {
+            if (column != "*")
+            {
+                column = "[" + column + "]";
+            }
+
             return "[" + TablePrefix + table + "]." + column;
         }
 
@@ -143,15 +148,15 @@ namespace YesSql.Core.Sql
                     sb.Append(" order by ").Append(_order);
                 }
 
-                if(!String.IsNullOrEmpty(Trail))
+                if (!String.IsNullOrEmpty(Trail))
                 {
                     sb.Append(" ").Append(Trail);
                 }
-                
+
                 return sb.ToString();
             }
 
             return "";
-        } 
+        }
     }
 }

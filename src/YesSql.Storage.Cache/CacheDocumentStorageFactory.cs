@@ -1,4 +1,6 @@
-﻿using System.Threading.Tasks;
+﻿using System;
+using System.Threading.Tasks;
+using YesSql.Core.Services;
 using YesSql.Core.Storage;
 
 namespace YesSql.Storage.Cache
@@ -13,20 +15,24 @@ namespace YesSql.Storage.Cache
             _concreteStorageFactory = concreteStorageFactory;
         }
 
-        public IDocumentStorage CreateDocumentStorage()
+        public IDocumentStorage CreateDocumentStorage(ISession session, Configuration configuration)
         {
-            if(_storage == null)
+            if (_storage == null)
             {
-                _storage = new CacheDocumentStorage(_concreteStorageFactory.CreateDocumentStorage());
+                _storage = new CacheDocumentStorage(_concreteStorageFactory.CreateDocumentStorage(session, configuration));
             }
 
             return _storage;
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(Configuration configuration)
         {
-            return _concreteStorageFactory.InitializeAsync();
+            return _concreteStorageFactory.InitializeAsync(configuration);
         }
 
+        public Task InitializeCollectionAsync(Configuration configuration, string collectionName)
+        {
+            throw new NotImplementedException();
+        }
     }
 }

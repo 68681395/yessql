@@ -1,4 +1,6 @@
-﻿using System.Threading.Tasks;
+﻿using System;
+using System.Threading.Tasks;
+using YesSql.Core.Services;
 using YesSql.Core.Storage;
 
 namespace YesSql.Storage.InMemory
@@ -7,9 +9,9 @@ namespace YesSql.Storage.InMemory
     {
         private InMemoryDocumentStorage _storage;
 
-        public IDocumentStorage CreateDocumentStorage()
+        public IDocumentStorage CreateDocumentStorage(ISession session, Configuration configuration)
         {
-            if(_storage == null)
+            if (_storage == null)
             {
                 _storage = new InMemoryDocumentStorage();
             }
@@ -17,7 +19,7 @@ namespace YesSql.Storage.InMemory
             return _storage;
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(Configuration configuration)
         {
 #if NET451
             return Task.FromResult(0);
@@ -26,5 +28,9 @@ namespace YesSql.Storage.InMemory
 #endif
         }
 
+        public Task InitializeCollectionAsync(Configuration configuration, string collectionName)
+        {
+            throw new NotImplementedException();
+        }
     }
 }

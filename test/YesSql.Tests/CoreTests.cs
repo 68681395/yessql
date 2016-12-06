@@ -1,9 +1,12 @@
 ﻿using System;
+using System.Data;
 using System.Data.SqlClient;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using Xunit;
+using YesSql.Core.Collections;
 using YesSql.Core.Services;
 using YesSql.Storage.Cache;
 using YesSql.Storage.InMemory;
@@ -23,18 +26,16 @@ namespace YesSql.Tests
 
         public SqliteTests()
         {
-            _store = new Store(cfg =>
-            {
-                _tempFolder = new TemporaryFolder();
-                cfg.ConnectionFactory = new DbConnectionFactory<SqliteConnection>(@"Data Source=" + _tempFolder.Folder + "yessql.db;Cache=Shared", true);
-                cfg.IsolationLevel = System.Data.IsolationLevel.Serializable;
+            _tempFolder = new TemporaryFolder();
 
-                // Sqlite needs two databases and two connection factories as transactions can't be nested
-                // and using a single connection would create a new transaction when creating documents.
-                // The other solution is to create a custom document factory that doesn't create new transactions
-                var storageConnectionFactory = new DbConnectionFactory<SqliteConnection>(@"Data Source=" + _tempFolder.Folder + "yessql_content.db;Cache=Shared", true);
-                cfg.DocumentStorageFactory = new SqlDocumentStorageFactory(storageConnectionFactory, cfg.IsolationLevel);
-            });
+            var configuration = new Configuration
+            {
+                ConnectionFactory = new DbConnectionFactory<SqliteConnection>(@"Data Source=" + _tempFolder.Folder + "yessql.db;Cache=Shared", true),
+                IsolationLevel = IsolationLevel.Serializable,
+                DocumentStorageFactory = new SqlDocumentStorageFactory()
+            };
+
+            _store = new Store(configuration);
 
             CleanDatabase();
             CreateTables();
@@ -46,6 +47,10 @@ namespace YesSql.Tests
 
             session.ExecuteMigration(schemaBuilder => schemaBuilder
                 .DropTable("Content"), false
+            );
+
+            session.ExecuteMigration(schemaBuilder => schemaBuilder
+                .DropTable("Collection1_Content"), false
             );
         }
     }
@@ -55,12 +60,14 @@ namespace YesSql.Tests
 
         public SqlServerTests()
         {
-            _store = new Store(cfg =>
+            var configuration = new Configuration
             {
-                cfg.ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString);
-                cfg.IsolationLevel = System.Data.IsolationLevel.ReadUncommitted;
-                cfg.DocumentStorageFactory = new SqlDocumentStorageFactory(cfg.ConnectionFactory);
-            });
+                ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString),
+                IsolationLevel = IsolationLevel.ReadUncommitted,
+                DocumentStorageFactory = new SqlDocumentStorageFactory()
+            };
+
+            _store = new Store(configuration);
 
             CleanDatabase();
             CreateTables();
@@ -73,6 +80,10 @@ namespace YesSql.Tests
             session.ExecuteMigration(schemaBuilder => schemaBuilder
                 .DropTable("Content"), false
             );
+
+            session.ExecuteMigration(schemaBuilder => schemaBuilder
+                .DropTable("Collection1_Content"), false
+            );
         }
     }
     public abstract class InMemoryTests : CoreTests
@@ -81,12 +92,14 @@ namespace YesSql.Tests
 
         public InMemoryTests()
         {
-            _store = new Store(cfg =>
+            var configuration = new Configuration
             {
-                cfg.ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString);
-                cfg.IsolationLevel = System.Data.IsolationLevel.ReadUncommitted;
-                cfg.DocumentStorageFactory = new InMemoryDocumentStorageFactory();
-            });
+                ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString),
+                IsolationLevel = IsolationLevel.ReadUncommitted,
+                DocumentStorageFactory = new InMemoryDocumentStorageFactory()
+            };
+
+            _store = new Store(configuration);
 
             CleanDatabase();
             CreateTables();
@@ -108,12 +121,14 @@ namespace YesSql.Tests
 
         public CacheTests()
         {
-            _store = new Store(cfg =>
+            var configuration = new Configuration
             {
-                cfg.ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString);
-                cfg.IsolationLevel = System.Data.IsolationLevel.ReadUncommitted;
-                cfg.DocumentStorageFactory = new CacheDocumentStorageFactory(new SqlDocumentStorageFactory(cfg.ConnectionFactory));
-            });
+                ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString),
+                IsolationLevel = IsolationLevel.ReadUncommitted,
+                DocumentStorageFactory = new CacheDocumentStorageFactory(new SqlDocumentStorageFactory())
+            };
+
+            _store = new Store(configuration);
 
             CleanDatabase();
             CreateTables();
@@ -135,14 +150,16 @@ namespace YesSql.Tests
 
         public LightningDBTests()
         {
-            _store = new Store(cfg =>
-            {
-                cfg.ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString);
-                cfg.IsolationLevel = System.Data.IsolationLevel.ReadUncommitted;
+            _tempFolder = new TemporaryFolder();
 
-                _tempFolder = new TemporaryFolder();
-                cfg.DocumentStorageFactory = new LightningDocumentStorageFactory(_tempFolder.Folder);
-            });
+            var configuration = new Configuration
+            {
+                ConnectionFactory = new DbConnectionFactory<SqlConnection>(ConnectionString),
+                IsolationLevel = IsolationLevel.ReadUncommitted,
+                DocumentStorageFactory = new LightningDocumentStorageFactory(_tempFolder.Folder)
+            };
+
+            _store = new Store(configuration);
 
             CleanDatabase();
             CreateTables();
@@ -178,16 +195,31 @@ namespace YesSql.Tests
 
         protected virtual void CleanDatabase()
         {
+            // Remove existing tables
             using (var session = _store.CreateSession())
             {
-                // Remove existing tables
                 session.ExecuteMigration(schemaBuilder => schemaBuilder
                     .DropReduceIndexTable(nameof(ArticlesByDay)), false
                 );
 
                 session.ExecuteMigration(schemaBuilder => schemaBuilder
+                    .DropMapIndexTable(nameof(ArticleByPublishedDate)), false
+                );
+
+                session.ExecuteMigration(schemaBuilder => schemaBuilder
                     .DropMapIndexTable(nameof(PersonByName)), false
                 );
+
+                session.ExecuteMigration(schemaBuilder => schemaBuilder
+                    .DropMapIndexTable(nameof(PersonIdentity)), false
+                );
+
+                using (new NamedCollection("Collection1"))
+                {
+                    session.ExecuteMigration(schemaBuilder => schemaBuilder
+                        .DropMapIndexTable(nameof(PersonByNameCol)), false
+                    );
+                }
 
                 session.ExecuteMigration(schemaBuilder => schemaBuilder
                     .DropMapIndexTable(nameof(PersonByAge)), false
@@ -198,7 +230,11 @@ namespace YesSql.Tests
                 );
 
                 session.ExecuteMigration(schemaBuilder => schemaBuilder
-                    .DropTable("Document"), false
+                    .DropTable(Store.DocumentTable), false
+                );
+
+                session.ExecuteMigration(schemaBuilder => schemaBuilder
+                    .DropTable("Collection1_Document"), false
                 );
 
                 session.ExecuteMigration(schemaBuilder => schemaBuilder
@@ -206,7 +242,6 @@ namespace YesSql.Tests
                 );
 
                 OnCleanDatabase(session);
-
             }
         }
 
@@ -230,8 +265,21 @@ namespace YesSql.Tests
                 );
 
                 session.ExecuteMigration(schemaBuilder => schemaBuilder
+                    .CreateMapIndexTable(nameof(ArticleByPublishedDate), column => column
+                        .Column<DateTime>(nameof(ArticleByPublishedDate.PublishedDateTime))
+                        .Column<DateTime>(nameof(ArticleByPublishedDate.PublishedDateTimeOffset))
+                    )
+                );
+
+                session.ExecuteMigration(schemaBuilder => schemaBuilder
                     .CreateMapIndexTable(nameof(PersonByName), column => column
                         .Column<string>(nameof(PersonByName.Name))
+                    )
+                );
+
+                session.ExecuteMigration(schemaBuilder => schemaBuilder
+                    .CreateMapIndexTable(nameof(PersonIdentity), column => column
+                        .Column<string>(nameof(PersonIdentity.Identity))
                     )
                 );
 
@@ -460,15 +508,17 @@ namespace YesSql.Tests
 
                 session.Save(bill);
 
-                // This query should force the index to be persisted
+                // This query triggers an auto-flush
 
                 Assert.Equal(1, await session.QueryAsync<Person, PersonByName>().Count());
 
                 bill.Firstname = "Bill2";
+                session.Save(bill);
 
                 Assert.Equal(1, await session.QueryAsync<Person, PersonByName>().Where(x => x.Name == "Bill2").Count());
 
                 bill.Firstname = "Bill3";
+                session.Save(bill);
 
                 Assert.Equal(1, await session.QueryIndexAsync<PersonByName>().Count());
             }
@@ -477,6 +527,88 @@ namespace YesSql.Tests
             {
                 Assert.Equal(1, await session.QueryIndexAsync<PersonByName>().Count());
                 Assert.Equal(1, await session.QueryIndexAsync<PersonByName>().Where(x => x.Name == "Bill3").Count());
+            }
+        }
+
+        [Fact]
+        public async Task ShouldAppendIndexOnUpdate()
+        {
+            // When an object is updated, its map indexes
+            // should be created a new records (to support append only scenarios)
+
+            _store.RegisterIndexes<PersonIndexProvider>();
+
+            using (var session = _store.CreateSession())
+            {
+                var bill = new Person
+                {
+                    Firstname = "Bill",
+                    Lastname = "Gates"
+                };
+
+                session.Save(bill);
+
+                var p1 = await session.QueryIndexAsync<PersonByName>().FirstOrDefault();
+
+                Assert.Equal(1, p1.Id);
+
+                bill.Firstname = "Bill2";
+                session.Save(bill);
+
+                var p2 = await session.QueryIndexAsync<PersonByName>().FirstOrDefault();
+
+                Assert.Equal(2, p2.Id);
+
+                bill.Firstname = "Bill3";
+                session.Save(bill);
+
+                var p3 = await session.QueryIndexAsync<PersonByName>().FirstOrDefault();
+
+                Assert.Equal(3, p3.Id);
+
+            }
+
+            using (var session = _store.CreateSession())
+            {
+                Assert.Equal(1, await session.QueryIndexAsync<PersonByName>().Count());
+                Assert.Equal(1, await session.QueryIndexAsync<PersonByName>().Where(x => x.Name == "Bill3").Count());
+            }
+        }
+
+        [Fact]
+        public async Task ShouldCreateSeveralMapIndexPerDocument()
+        {
+            // When an index returns multiple map indexes, they should all be stored
+            // and queryable.
+
+            // This test also ensure we can use a SQL keyword as the column name (Identity)
+
+            _store.RegisterIndexes<PersonIdentitiesIndexProvider>();
+
+            using (var session = _store.CreateSession())
+            {
+                var hanselman = new Person
+                {
+                    Firstname = "Scott",
+                    Lastname = "Hanselman"
+                };
+
+                var guthrie = new Person
+                {
+                    Firstname = "Scott",
+                    Lastname = "Guthrie"
+                };
+
+                session.Save(hanselman);
+                session.Save(guthrie);
+            }
+
+            using (var session = _store.CreateSession())
+            {
+                Assert.Equal(4, await session.QueryIndexAsync<PersonIdentity>().Count());
+                Assert.Equal(1, await session.QueryIndexAsync<PersonIdentity>().Where(x => x.Identity == "Hanselman").Count());
+                Assert.Equal(1, await session.QueryIndexAsync<PersonIdentity>().Where(x => x.Identity == "Guthrie").Count());
+                Assert.Equal(2, await session.QueryIndexAsync<PersonIdentity>().Where(x => x.Identity == "Scott").Count());
             }
         }
 
@@ -1198,7 +1330,6 @@ namespace YesSql.Tests
 
                     session.Save(person);
                 }
-
             }
 
             using (var session = _store.CreateSession())
@@ -1699,6 +1830,364 @@ namespace YesSql.Tests
                 Assert.Equal(0, await session.QueryAsync().For<Person>()
                     .With<PersonByName>(x => x.Name.IsIn(new string[0]))
                     .Count());
+            }
+        }
+
+        [Fact]
+        public async Task ShouldReadCommittedRecords()
+        {
+            /*
+             * session1 created
+             * session1 0 index found
+             * session1 save and commit person
+             * session1 1 index found (session1 statements flushed)
+             * session1 disposed
+             * session2 created
+             * session2 1 index found (session1 statements isolated)
+             * session2 save and commit person
+             * session2 2 index found (session2 statements flushed)
+             * session2 disposed (session2 transation committed)
+             * session2 2 index found
+             * session1 2 index found
+             */
+
+            _store.RegisterIndexes<PersonIndexProvider>();
+
+            var session1IsDisposed = new ManualResetEvent(false);
+            var session2IsDisposed = new ManualResetEvent(false);
+
+            var task1 = Task.Run(async () =>
+            {
+                using (var session1 = _store.CreateSession(IsolationLevel.ReadCommitted))
+                {
+                    Assert.Equal(0, await session1.QueryIndexAsync<PersonByName>().Count());
+
+                    var bill = new Person
+                    {
+                        Firstname = "Bill",
+                        Lastname = "Gates",
+                    };
+
+                    session1.Save(bill);
+                    await session1.CommitAsync();
+
+                    Assert.Equal(1, await session1.QueryIndexAsync<PersonByName>().Count());
+                }
+
+                session1IsDisposed.Set();
+
+                if (!session2IsDisposed.WaitOne(5000))
+                {
+                    Assert.True(false, "session2IsDisposed timeout");
+                }
+
+                using (var session1 = _store.CreateSession(IsolationLevel.ReadCommitted))
+                {
+                    Assert.Equal(2, await session1.QueryIndexAsync<PersonByName>().Count());
+                }
+            });
+
+            var task2 = Task.Run(async () =>
+            {
+                if (!session1IsDisposed.WaitOne(5000))
+                {
+                    Assert.True(false, "session1IsDisposed timeout");
+                }
+
+                using (var session2 = _store.CreateSession(IsolationLevel.ReadCommitted))
+                {
+                    Assert.Equal(1, await session2.QueryIndexAsync<PersonByName>().Count());
+
+                    var steve = new Person
+                    {
+                        Firstname = "Steve",
+                        Lastname = "Ballmer",
+                    };
+
+                    session2.Save(steve);
+
+                    await session2.CommitAsync();
+
+                    Assert.Equal(2, await session2.QueryIndexAsync<PersonByName>().Count());
+                }
+
+                using (var session2 = _store.CreateSession(IsolationLevel.ReadCommitted))
+                {
+                    Assert.Equal(2, await session2.QueryIndexAsync<PersonByName>().Count());
+                }
+
+                session2IsDisposed.Set();
+
+            });
+
+            await Task.WhenAll(task1, task2);
+        }
+
+        [Fact]
+        public async Task ShouldReadUncommittedRecords()
+        {
+            /*
+             * session1 created
+             * session1 0 index found
+             * session1 save and commit person
+             * session1 1 index found (session1 statements flushed)
+             * session2 created
+             * session2 1 index found (session1 statements isolated)
+             * session2 save and commit person
+             * session2 2 index found (session2 statements flushed)
+             * session2 disposed (session2 transation committed)
+             * session2 2 index found
+             * session1 disposed
+             * session1 2 index found
+             */
+
+            _store.RegisterIndexes<PersonIndexProvider>();
+
+            var session1IsFlushed = new ManualResetEvent(false);
+            var session2IsDisposed = new ManualResetEvent(false);
+
+            var task1 = Task.Run(async () =>
+            {
+                using (var session1 = _store.CreateSession(IsolationLevel.ReadUncommitted))
+                {
+                    Assert.Equal(0, await session1.QueryIndexAsync<PersonByName>().Count());
+
+                    var bill = new Person
+                    {
+                        Firstname = "Bill",
+                        Lastname = "Gates",
+                    };
+
+                    session1.Save(bill);
+                    await session1.CommitAsync();
+
+                    Assert.Equal(1, await session1.QueryIndexAsync<PersonByName>().Count());
+
+                    session1IsFlushed.Set();
+                    if (!session2IsDisposed.WaitOne(5000))
+                    {
+                        Assert.True(false, "session2IsDisposed timeout");
+                    }
+                }
+
+                using (var session1 = _store.CreateSession(IsolationLevel.ReadUncommitted))
+                {
+                    Assert.Equal(2, await session1.QueryIndexAsync<PersonByName>().Count());
+                }
+            });
+
+            var task2 = Task.Run(async () =>
+            {
+                if (!session1IsFlushed.WaitOne(5000))
+                {
+                    Assert.True(false, "session1IsFlushed timeout");
+                }
+
+                using (var session2 = _store.CreateSession(IsolationLevel.ReadUncommitted))
+                {
+                    Assert.Equal(1, await session2.QueryIndexAsync<PersonByName>().Count());
+
+                    var steve = new Person
+                    {
+                        Firstname = "Steve",
+                        Lastname = "Ballmer",
+                    };
+
+                    session2.Save(steve);
+
+                    await session2.CommitAsync();
+
+                    Assert.Equal(2, await session2.QueryIndexAsync<PersonByName>().Count());
+                }
+
+                using (var session2 = _store.CreateSession(IsolationLevel.ReadUncommitted))
+                {
+                    Assert.Equal(2, await session2.QueryIndexAsync<PersonByName>().Count());
+                }
+
+                session2IsDisposed.Set();
+
+            });
+
+            await Task.WhenAll(task1, task2);
+        }
+
+        [Fact]
+        public async Task ShouldSaveInCollections()
+        {
+            await _store.InitializeCollectionAsync("Collection1");
+
+            using (var session = _store.CreateSession())
+            {
+                var bill = new
+                {
+                    Firstname = "Bill",
+                    Lastname = "Gates"
+                };
+
+                session.Save(bill);
+            }
+
+            using (var session = _store.CreateSession())
+            {
+                Assert.Equal(1, await session.QueryAsync().Any().Count());
+            }
+
+            using (new NamedCollection("Collection1"))
+            {
+                using (var session = _store.CreateSession())
+                {
+
+                    var steve = new
+                    {
+                        Firstname = "Steve",
+                        Lastname = "Balmer"
+                    };
+
+                    session.Save(steve);
+                }
+
+                using (var session = _store.CreateSession())
+                {
+                    Assert.Equal(1, await session.QueryAsync().Any().Count());
+                }
+            }
+        }
+
+        [Fact]
+        public async Task ShouldFilterMapIndexPerCollection()
+        {
+            await _store.InitializeCollectionAsync("Collection1");
+
+            using (new NamedCollection("Collection1"))
+            {
+                using (var session = _store.CreateSession())
+                {
+                    session.ExecuteMigration(schemaBuilder => schemaBuilder
+                    .CreateMapIndexTable(nameof(PersonByNameCol), column => column
+                        .Column<string>(nameof(PersonByNameCol.Name))
+                        )
+                    );
+                }
+
+                _store.RegisterIndexes<PersonIndexProviderCol>();
+
+                using (var session = _store.CreateSession())
+                {
+                    var bill = new Person
+                    {
+                        Firstname = "Bill",
+                        Lastname = "Gates",
+                    };
+
+                    var steve = new Person
+                    {
+                        Firstname = "Steve",
+                        Lastname = "Balmer"
+                    };
+
+                    session.Save(bill);
+                    session.Save(steve);
+                }
+
+                using (var session = _store.CreateSession())
+                {
+                    Assert.Equal(2, await session.QueryAsync<Person, PersonByNameCol>().Count());
+                    Assert.Equal(1, await session.QueryAsync<Person, PersonByNameCol>(x => x.Name == "Steve").Count());
+                    Assert.Equal(1, await session.QueryAsync<Person, PersonByNameCol>().Where(x => x.Name == "Steve").Count());
+                }
+            }
+
+            // Store a Person in the default collection
+            using (var session = _store.CreateSession())
+            {
+                var satya = new Person
+                {
+                    Firstname = "Satya",
+                    Lastname = "Nadella",
+                };
+
+                session.Save(satya);
+            }
+
+            // Ensure the index hasn't been altered
+            using (var session = _store.CreateSession())
+            {
+                Assert.Equal(1, await session.QueryAsync<Person>().Count());
+                Assert.Equal(2, await session.QueryIndexAsync<PersonByNameCol>().Count());
+            }
+        }
+
+        [Fact]
+        public async Task ShouldIndexWithDateTime()
+        {
+            _store.RegisterIndexes<ArticleBydPublishedDateProvider>();
+
+            using (var session = _store.CreateSession())
+            {
+                var dates = new[]
+                {
+                    new DateTime(2011, 11, 1, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 2, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 3, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 4, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 1, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 2, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 3, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 1, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 2, 0, 0, 0, DateTimeKind.Utc),
+                    new DateTime(2011, 11, 1, 0, 0, 0, DateTimeKind.Utc)
+                };
+
+                var articles = dates.Select((x, i) => new Article
+                {
+                    IsPublished = i % 2 == 0, // half are published
+                    PublishedUtc = x
+                });
+
+                foreach (var article in articles)
+                {
+                    session.Save(article);
+                }
+            }
+
+            using (var session = _store.CreateSession())
+            {
+                Assert.Equal(10, await session.QueryIndexAsync<ArticleByPublishedDate>().Count());
+
+                Assert.Equal(4, await session.QueryIndexAsync<ArticleByPublishedDate>(x => x.PublishedDateTime == new DateTime(2011, 11, 1, 0, 0, 0, DateTimeKind.Utc)).Count());
+                Assert.Equal(4, await session.QueryIndexAsync<ArticleByPublishedDate>(x => x.PublishedDateTimeOffset == new DateTime(2011, 11, 1, 0, 0, 0, DateTimeKind.Utc)).Count());
+
+                Assert.Equal(4, await session.QueryIndexAsync<ArticleByPublishedDate>(x => x.PublishedDateTimeOffset == new DateTimeOffset(2011, 11, 1, 0, 0, 0, new TimeSpan(0))).Count());
+            }
+        }
+
+        [Fact]
+        public async Task ShouldUpdateEntitiesFromSeparateSessions()
+        {
+            _store.RegisterIndexes<PersonIndexProvider>();
+
+            var bill = new Person
+            {
+                Firstname = "Bill",
+                Lastname = "Gates"
+            };
+
+            using (var session = _store.CreateSession())
+            {
+                session.Save(bill);
+                Assert.Equal(1, await session.QueryAsync<Person, PersonByName>().Count());
+                Assert.Equal(1, await session.QueryIndexAsync<PersonByName>().Where(x => x.Name == "Bill").Count());
+            }
+
+            using (var session = _store.CreateSession())
+            {
+                bill.Firstname = "Bill2";
+                session.Save(bill);
+
+                Assert.Equal(1, await session.QueryAsync<Person, PersonByName>().Count());
+                Assert.Equal(0, await session.QueryIndexAsync<PersonByName>().Where(x => x.Name == "Bill").Count());
+                Assert.Equal(1, await session.QueryIndexAsync<PersonByName>().Where(x => x.Name == "Bill2").Count());
             }
         }
     }

@@ -1,18 +1,19 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Data;
 using System.Linq;
-using YesSql.Core.Indexes;
-using YesSql.Core.Data;
 using System.Reflection;
-using YesSql.Core.Sql;
 using System.Threading.Tasks;
+using YesSql.Core.Collections;
+using YesSql.Core.Data;
+using YesSql.Core.Indexes;
 
 namespace YesSql.Core.Services
 {
     public class Store : IStore
     {
-        protected readonly IList<IIndexProvider> Indexes;
+        protected readonly List<IIndexProvider> Indexes;
         protected readonly LinearBlockIdGenerator IdGenerator;
 
         public Configuration Configuration
@@ -23,25 +24,26 @@ namespace YesSql.Core.Services
         internal readonly ConcurrentDictionary<Type, Func<IIndex, object>> GroupMethods =
             new ConcurrentDictionary<Type, Func<IIndex, object>>();
 
-        internal readonly ConcurrentDictionary<Type, IEnumerable<IndexDescriptor>> Descriptors =
-            new ConcurrentDictionary<Type, IEnumerable<IndexDescriptor>>();
+        internal readonly ConcurrentDictionary<TypeCollectionTuple, IEnumerable<IndexDescriptor>> Descriptors =
+            new ConcurrentDictionary<TypeCollectionTuple, IEnumerable<IndexDescriptor>>();
 
         internal readonly ConcurrentDictionary<Type, IIdAccessor<int>> _idAccessors =
             new ConcurrentDictionary<Type, IIdAccessor<int>>();
 
+        internal readonly ConcurrentDictionary<Type, Func<IDescriptor>> DescriptorActivators =
+            new ConcurrentDictionary<Type, Func<IDescriptor>>();
 
-        public Store(Action<Configuration> cfg)
+        public const string DocumentTable = "Document";
+
+        public Store(Configuration configuration)
         {
-            Configuration = new Configuration();
+            Configuration = configuration;
             Indexes = new List<IIndexProvider>();
-            cfg(Configuration);
-
             ValidateConfiguration();
-
-            IdGenerator = new LinearBlockIdGenerator(Configuration.ConnectionFactory, 20, "index", Configuration.TablePrefix);
+            IdGenerator = new LinearBlockIdGenerator(Configuration.ConnectionFactory, 20, Configuration.TablePrefix);
         }
 
-        public async Task InitializeAsync()
+        public Task InitializeAsync()
         {
             using (var session = CreateSession())
             {
@@ -59,11 +61,36 @@ namespace YesSql.Core.Services
                     builder.CreateTable(LinearBlockIdGenerator.TableName, table => table
                         .Column<string>("dimension")
                         .Column<ulong>("nextval")
+                    )
+                    .AlterTable(LinearBlockIdGenerator.TableName, table => table
+                        .CreateIndex("IX_Dimension", "dimension")
                     );
                 });
             }
 
-            await Configuration.DocumentStorageFactory.InitializeAsync();
+            return Configuration.DocumentStorageFactory.InitializeAsync(Configuration);
+        }
+
+        public Task InitializeCollectionAsync(string collectionName)
+        {
+            var documentTable = collectionName + "_" + "Document";
+
+            using (var session = CreateSession())
+            {
+                session.ExecuteMigration(builder =>
+                {
+                    builder
+                        .CreateTable(documentTable, table => table
+                        .Column<int>("Id", column => column.PrimaryKey().NotNull())
+                        .Column<string>("Type", column => column.NotNull())
+                    )
+                    .AlterTable(documentTable, table => table
+                        .CreateIndex("IX_Type", "Type")
+                    );
+                });
+            }
+
+            return Configuration.DocumentStorageFactory.InitializeCollectionAsync(Configuration, collectionName);
         }
 
         private void ValidateConfiguration()
@@ -81,50 +108,21 @@ namespace YesSql.Core.Services
 
         public ISession CreateSession()
         {
-            var storage = Configuration.DocumentStorageFactory.CreateDocumentStorage();
-            return new Session(storage, this);
+            return new Session(s => Configuration.DocumentStorageFactory.CreateDocumentStorage(s, Configuration), this, Configuration.IsolationLevel);
+        }
+
+        public ISession CreateSession(IsolationLevel isolationLevel)
+        {
+            return new Session(s => Configuration.DocumentStorageFactory.CreateDocumentStorage(s, Configuration), this, isolationLevel);
         }
 
         public void Dispose()
         {
             var disposableFactory = Configuration.DocumentStorageFactory as IDisposable;
-            if(disposableFactory != null)
+            if (disposableFactory != null)
             {
                 disposableFactory.Dispose();
             }
-        }
-
-        public IStore RegisterIndexes<T>() where T : IIndexProvider
-        {
-            return RegisterIndexes(typeof(T));
-        }
-
-        public IStore RegisterIndexes(Type type)
-        {
-            var index = Activator.CreateInstance(type) as IIndexProvider;
-            if (index != null)
-            {
-                Indexes.Add(index);
-            }
-
-            return this;
-        }
-
-        public IStore RegisterIndexes(IEnumerable<Type> types)
-        {
-            foreach (var type in types)
-            {
-                RegisterIndexes(type);
-            }
-
-            return this;
-        }
-
-        public IStore RegisterIndexes(Assembly assembly)
-        {
-            var exportedTypes = assembly.GetExportedTypes();
-            var indexes = exportedTypes.Where(x => typeof(IIndexProvider).IsAssignableFrom(x));
-            return RegisterIndexes(indexes);
         }
 
         public IIdAccessor<int> GetIdAccessor(Type tContainer, string name)
@@ -142,14 +140,19 @@ namespace YesSql.Core.Services
                 throw new ArgumentNullException();
             }
 
-            return Descriptors.GetOrAdd(target, key =>
+            var collection = CollectionHelper.Current.GetSafeName();
+
+            var tupe = new TypeCollectionTuple(target, collection);
+
+            return Descriptors.GetOrAdd(tupe, key =>
             {
-                var contextType = typeof(DescribeContext<>).MakeGenericType(target);
-                var context = Activator.CreateInstance(contextType) as IDescriptor;
+                var activator = DescriptorActivators.GetOrAdd(key.Type, type => MakeDescriptorActivator(type));
+                var context = activator();
 
                 foreach (var provider in Indexes)
                 {
-                    if (provider.ForType().IsAssignableFrom(target))
+                    if (provider.ForType().IsAssignableFrom(target) &&
+                        String.Equals(key.Collection, provider.CollectionName, StringComparison.OrdinalIgnoreCase))
                     {
                         provider.Describe(context);
                     }
@@ -159,9 +162,41 @@ namespace YesSql.Core.Services
             });
         }
 
-        public int GetNextId()
+        private static Func<IDescriptor> MakeDescriptorActivator(Type type)
         {
-            return (int)IdGenerator.GetNextId();
+            var contextType = typeof(DescribeContext<>).MakeGenericType(type);
+
+            // TODO: Implement a more performant activator
+            return () => Activator.CreateInstance(contextType) as IDescriptor;
+        }
+
+        public int GetNextId(string collection)
+        {
+            return (int)IdGenerator.GetNextId(collection);
+        }
+
+        public IStore RegisterIndexes(params IIndexProvider[] indexProviders)
+        {
+            foreach(var indexProvider in indexProviders)
+            {
+                if(indexProvider.CollectionName == null)
+                {
+                    indexProvider.CollectionName = CollectionHelper.Current.GetSafeName();
+                }
+            }
+
+            Indexes.AddRange(indexProviders);
+            return this;
+        }
+
+        internal class TypeCollectionTuple : Tuple<Type, string>
+        {
+            public TypeCollectionTuple(Type type, string collection) : base(type, collection)
+            {
+            }
+
+            public Type Type { get { return Item1; } }
+            public string Collection { get { return Item2; } }
         }
     }
 }
